@@ -46,7 +46,14 @@ the gaps and errors left in on purpose.
    many patients *without* sepsis get alerts, and whether performance holds across
    age groups, sex and ICU type. Alert thresholds are always set at the training
    hospital, never tuned on the test hospital.
-6. **Serves predictions.** A small web service takes a patient's hourly data and
+6. **Asks which patients a new hospital should label.** A hospital adopting a model
+   built elsewhere can usually afford chart review for only a few of its own
+   patients. `active.py` compares ways of choosing them, in rounds of 25 to 400
+   patients: at random, by model uncertainty, by highest risk, by spreading picks
+   across the population, by picking patients least like the original hospital, and a
+   hybrid of uncertainty, hospital difference and spread. After each round the model is
+   retrained and judged on accuracy, alerts and the worst-served patient group.
+7. **Serves predictions.** A small web service takes a patient's hourly data and
    returns the risk for each hour and whether it would trigger an alert.
 
 ## Results
@@ -60,9 +67,10 @@ You need Python 3.10 or newer and about 8 GB of free memory for the full dataset
 **Mac / Linux**
 ```bash
 pip install -r requirements.txt
-make test        # 13 tests on made-up data, about a minute
+make test        # 16 tests on made-up data, about a minute
 make data        # downloads the 40,336 patient files (resumable)
 make run         # full analysis, roughly 30-60 minutes on a laptop
+make active      # which-patients-to-label experiments, a few hours (run after `make run`)
 make serve       # web service at http://localhost:8000/docs
 ```
 
@@ -73,6 +81,7 @@ $env:PYTHONPATH = "src"
 python -m pytest -q
 python -m sepsis.download
 python -m sepsis.pipeline --raw data/raw --out artifacts
+python -m sepsis.active --omop artifacts/omop --out artifacts_active
 ```
 
 For a quick trial on part of the data: `python -m sepsis.pipeline --raw data/raw --out artifacts_fast --limit 2000 --fast`.
@@ -92,6 +101,7 @@ For a quick trial on part of the data: `python -m sepsis.pipeline --raw data/raw
 | `evaluate.py` | Accuracy, calibration, alert and subgroup metrics |
 | `experiments.py` | Runs every training and testing setup |
 | `report.py` | Charts and the written report |
+| `active.py` | Which-patients-to-label experiments |
 | `api.py` | Scoring web service |
 
 ## Limits
