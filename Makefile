@@ -1,0 +1,26 @@
+PY ?= python
+export PYTHONPATH := src
+
+.PHONY: install data run run-fast test serve docker
+
+install:
+	$(PY) -m pip install -r requirements.txt
+
+data:
+	$(PY) -m sepsis.download
+
+run:
+	$(PY) -m sepsis.pipeline --raw data/raw --out artifacts
+
+run-fast:
+	$(PY) -m sepsis.pipeline --raw data/raw --out artifacts_fast --limit 2000 --fast
+
+test:
+	$(PY) -m pytest -q
+
+serve:
+	MODEL_DIR=artifacts/model uvicorn sepsis.api:app --port 8000
+
+docker:
+	docker build -t sepsis-api .
+	docker run --rm -p 8000:8000 sepsis-api
