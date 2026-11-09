@@ -58,7 +58,17 @@ the gaps and errors left in on purpose.
 
 ## Results
 
-_To be filled in after the full run. See [docs/REPORT.md](docs/REPORT.md)._
+From the full run (one training run per model; details and confidence intervals in [docs/REPORT.md](docs/REPORT.md)):
+
+| Trained on | Trees, tested at A | Trees, tested at B | GRU, tested at A | GRU, tested at B |
+|---|---|---|---|---|
+| Same hospital | 0.813 | 0.846 | 0.798 | 0.830 |
+| Other hospital | 0.743 | 0.734 | 0.732 | 0.746 |
+| Both hospitals | 0.820 | 0.845 | 0.814 | 0.838 |
+
+- **Accuracy drops at a new hospital.** AUROC fell by 0.07–0.11 when a model was used at the hospital it wasn't trained on. Training on both hospitals matched each hospital's own model.
+- **Alert thresholds don't carry over.** With the threshold set to flag about 80% of septic patients at the training hospital, the hospital B model alerted 60% of patients without sepsis at hospital A (A's own model: 35%). The other way round, A's model flagged only 53% of B's septic patients before onset (B's own model: 82%).
+- **Label-free adjustments were not consistent.** No method helped in both directions in this run; repeated training runs and the which-patients-to-label experiments are next.
 
 ## Running it
 
