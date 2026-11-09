@@ -23,6 +23,7 @@ Reference points: budget 0 (source model as-is) and "all target labels" (upper b
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -141,7 +142,9 @@ def _evaluate(model, X, meta, test_idx, src_valid_idx, catch_target):
 
 
 def run_direction(X, meta, src: str, tgt: str, budgets, strategies, seeds, target_weight: float,
-                  catch_target: float, gbm_iter: int, log=print) -> pd.DataFrame:
+                  catch_target: float, gbm_iter: int, log=print, ckpt: Path | None = None) -> pd.DataFrame:
+    """With ckpt, results are saved after every (seed, strategy), so a stopped run can be
+    restarted with the same command and only the unfinished parts are run again."""
     sel = lambda site, split: meta.index[(meta.site == site) & (meta.split == split)]
     s_tr, s_va = sel(src, "train"), sel(src, "valid")
     t_pool_rows, t_te = sel(tgt, "train"), sel(tgt, "test")
@@ -162,22 +165,40 @@ def run_direction(X, meta, src: str, tgt: str, budgets, strategies, seeds, targe
         m.calibrate(X.loc[s_va], meta.loc[s_va, "SepsisLabel"].to_numpy())
         return m
 
+    tag = f"{src}-{tgt}"
+
     for seed in seeds:
+        files = {name: (ckpt / f"{tag}_seed{seed}_{name}.csv") if ckpt else None
+                 for name in ["start"] + list(strategies)}
+        if ckpt and all(f.exists() for f in files.values()):
+            for f in files.values():
+                rows.extend(pd.read_csv(f).to_dict("records"))
+            log(f"{src}->{tgt} seed {seed}: already finished, loaded from checkpoint")
+            continue
         base = fit(seed, [])
-        r0 = _evaluate(base, X, meta, t_te, s_va, catch_target)
         dom = domain_scores(emb_src, emb_tgt, seed)
+        if ckpt and files["start"].exists():
+            rows.extend(pd.read_csv(files["start"]).to_dict("records"))
+        else:
+            r0 = _evaluate(base, X, meta, t_te, s_va, catch_target)
+            start = [{"direction": f"{src}->{tgt}", "strategy": strat, "seed": seed,
+                      "budget": 0, "septic_labelled": 0, **r0} for strat in strategies]
+            # upper bound: all target training labels
+            full = fit(seed, list(pool_pids))
+            start.append({"direction": f"{src}->{tgt}", "strategy": "all_target_labels", "seed": seed,
+                          "budget": len(pool_pids), "septic_labelled": int(
+                              meta.loc[t_pool_rows].groupby("person_id")["SepsisLabel"].max().sum()),
+                          **_evaluate(full, X, meta, t_te, s_va, catch_target)})
+            rows.extend(start)
+            if ckpt:
+                pd.DataFrame(start).to_csv(files["start"], index=False)
         for strat in strategies:
-            rows.append({"direction": f"{src}->{tgt}", "strategy": strat, "seed": seed,
-                         "budget": 0, "septic_labelled": 0, **r0})
-        # upper bound: all target training labels
-        full = fit(seed, list(pool_pids))
-        rows.append({"direction": f"{src}->{tgt}", "strategy": "all_target_labels", "seed": seed,
-                     "budget": len(pool_pids), "septic_labelled": int(
-                         meta.loc[t_pool_rows].groupby("person_id")["SepsisLabel"].max().sum()),
-                     **_evaluate(full, X, meta, t_te, s_va, catch_target)})
-        for strat in strategies:
+            if ckpt and files[strat].exists():
+                rows.extend(pd.read_csv(files[strat]).to_dict("records"))
+                log(f"{src}->{tgt} seed {seed} {strat:11s} loaded from checkpoint")
+                continue
             t0 = time.time()
-            model, labelled = base, []
+            model, labelled, done = base, [], []
             for b in budgets:
                 p_pool = pd.Series(model.predict(X.loc[t_pool_rows]), index=t_pool_rows)
                 remaining = pool_pids.difference(labelled)
@@ -188,10 +209,13 @@ def run_direction(X, meta, src: str, tgt: str, budgets, strategies, seeds, targe
                 n_sep = int(meta.loc[t_pool_rows][pid.loc[t_pool_rows].isin(labelled).to_numpy()]
                             .groupby("person_id")["SepsisLabel"].max().sum())
                 res = _evaluate(model, X, meta, t_te, s_va, catch_target)
-                rows.append({"direction": f"{src}->{tgt}", "strategy": strat, "seed": seed,
+                done.append({"direction": f"{src}->{tgt}", "strategy": strat, "seed": seed,
                              "budget": b, "septic_labelled": n_sep, **res})
+            rows.extend(done)
+            if ckpt:
+                pd.DataFrame(done).to_csv(files[strat], index=False)
             log(f"{src}->{tgt} seed {seed} {strat:11s} AUROC@{budgets[-1]} "
-                f"{rows[-1]['AUROC']:.3f} ({time.time() - t0:.0f}s)")
+                f"{done[-1]['AUROC']:.3f} ({time.time() - t0:.0f}s)")
     return pd.DataFrame(rows)
 
 
@@ -310,8 +334,15 @@ def run(out: Path, raw="data/raw", omop=None, synthetic=False, budgets=DEFAULT_B
         syn = out / "synthetic_raw"
         write_synthetic(syn, n_per_site=limit or 400)
     X, meta = prepare(raw, omop, syn, 0 if synthetic else limit)
+    # checkpoints are kept per settings, so changing budgets etc. never mixes old and new results
+    cfg = {"budgets": list(budgets), "target_weight": target_weight, "catch_target": catch_target,
+           "gbm_iter": gbm_iter, "limit": limit, "synthetic": synthetic}
+    key = hashlib.sha1(json.dumps(cfg, sort_keys=True).encode()).hexdigest()[:10]
+    ckpt = out / "checkpoints" / key
+    ckpt.mkdir(parents=True, exist_ok=True)
+    (ckpt / "settings.json").write_text(json.dumps(cfg, indent=2))
     res = pd.concat([run_direction(X, meta, s, t, budgets, strategies, seeds, target_weight,
-                                   catch_target, gbm_iter, log) for s, t in [("A", "B"), ("B", "A")]])
+                                   catch_target, gbm_iter, log, ckpt) for s, t in [("A", "B"), ("B", "A")]])
     res.to_csv(out / "active_results.csv", index=False)
     summ = summarize(res)
     summ.to_csv(out / "active_summary.csv", index=False)
