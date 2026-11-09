@@ -1,7 +1,7 @@
 PY ?= python
 export PYTHONPATH := src
 
-.PHONY: install data run run-fast active test serve docker
+.PHONY: install data run run-seeds run-fast active test serve docker
 
 install:
 	$(PY) -m pip install -r requirements.txt
@@ -11,6 +11,9 @@ data:
 
 run:
 	$(PY) -m sepsis.pipeline --raw data/raw --out artifacts
+
+run-seeds:
+	$(PY) -m sepsis.pipeline --from-omop artifacts/omop --out artifacts --seeds 0,1,2
 
 run-fast:
 	$(PY) -m sepsis.pipeline --raw data/raw --out artifacts_fast --limit 2000 --fast

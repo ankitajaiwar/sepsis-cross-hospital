@@ -67,7 +67,7 @@ You need Python 3.10 or newer and about 8 GB of free memory for the full dataset
 **Mac / Linux**
 ```bash
 pip install -r requirements.txt
-make test        # 16 tests on made-up data, about a minute
+make test        # 19 tests on made-up data, a few minutes
 make data        # downloads the 40,336 patient files (resumable)
 make run         # full analysis, roughly 30-60 minutes on a laptop
 make active      # which-patients-to-label experiments, a few hours (run after `make run`)
@@ -83,6 +83,12 @@ python -m sepsis.download
 python -m sepsis.pipeline --raw data/raw --out artifacts
 python -m sepsis.active --omop artifacts/omop --out artifacts_active
 ```
+
+To train every model several times with different random seeds (recommended before
+comparing methods), reusing the OMOP tables from the first run:
+`python -m sepsis.pipeline --from-omop artifacts/omop --out artifacts --seeds 0,1,2`.
+Finished trainings are saved in `artifacts/runs`, so an interrupted run picks up where it
+stopped and only new seeds are trained.
 
 For a quick trial on part of the data: `python -m sepsis.pipeline --raw data/raw --out artifacts_fast --limit 2000 --fast`.
 
@@ -106,7 +112,7 @@ For a quick trial on part of the data: `python -m sepsis.pipeline --raw data/raw
 
 ## Limits
 
-Two hospital systems from the 2010s; a third was kept private by the challenge
+Two US hospital systems; a third was kept private by the challenge
 organisers. The data has no real dates, so patients are split at random rather than by
 time. Sepsis labels follow the challenge's definition. This is a research
 demonstration, not a clinical tool.

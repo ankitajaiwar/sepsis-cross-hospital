@@ -143,8 +143,24 @@ def _f(x, d=3):
     return "–" if x is None or (isinstance(x, float) and np.isnan(x)) else f"{x:.{d}f}"
 
 
+def _ci(ci, d=3, pct=False):
+    if not isinstance(ci, (list, tuple)) or any(np.isnan(c) for c in ci):
+        return ""
+    if pct:
+        return f" ({max(ci[0], 0):.0f}–{min(ci[1], 100):.0f})"
+    if ci[0] < 0:   # intervals for differences: avoid "-0.005–-0.001"
+        return f" ({ci[0]:+.{d}f} to {ci[1]:+.{d}f})"
+    return f" ({ci[0]:.{d}f}–{ci[1]:.{d}f})"
+
+
+COMPARED = {"site_normalized": "adjusted to local norms", "importance_wt": "importance weighting",
+            "dann": "domain-adversarial training",
+            "trained_at_test_hospital": "model trained at the test hospital itself"}
+
+
 def write_report(out: Path, res: pd.DataFrame, qrep: dict, n_bad: int, sub: pd.DataFrame,
-                 curves: dict, main_model: str, synthetic: bool):
+                 curves: dict, main_model: str, synthetic: bool, comp: pd.DataFrame | None = None,
+                 n_seeds: int = 1):
     L = ["# Predicting sepsis early, and checking whether it works at another hospital\n"]
     if synthetic:
         L.append("> **Made-up test data.** These numbers only show the code runs.\n")
@@ -167,17 +183,42 @@ def write_report(out: Path, res: pd.DataFrame, qrep: dict, n_bad: int, sub: pd.D
     L.append("Each model was tested on patients it never saw. AUROC is the chance the model gives "
              "a higher score to an hour shortly before sepsis than to an hour that isn't (0.5 = coin flip).\n")
     L.append("![cross hospital](cross_hospital.png)\n")
-    L.append("| Model | Trained on | Tested on | Method | AUROC (95% CI) | Septic patients flagged by onset | Patients without sepsis who got an alert |")
-    L.append("|---|---|---|---|---|---|---|")
+    seed_col = n_seeds > 1
+    L.append("| Model | Trained on | Tested on | Method | AUROC (95% CI) |"
+             + (" Range across runs |" if seed_col else "")
+             + " Septic patients flagged by onset | Patients without sepsis who got an alert |"
+             " Alert-hours per 100 patient-days |")
+    L.append("|---|---|---|---|---|" + ("---|" if seed_col else "") + "---|---|---|")
     label = {"standard": "–", "source_only": "no adjustment", "site_normalized": "adjusted to local norms",
              "importance_wt": "importance weighting", "dann": "domain-adversarial training"}
     for _, r in res.sort_values(["model", "test", "setting"]).iterrows():
-        ci = r.get("AUROC_ci")
-        ci_s = f" ({ci[0]:.3f}–{ci[1]:.3f})" if isinstance(ci, (list, tuple)) else ""
+        rng = f" {r.AUROC_seed_min:.3f}–{r.AUROC_seed_max:.3f} |" if seed_col else ""
         L.append(f"| {NAMES[r.model]} | {r.train.replace('+', ' + ')} | {r.test} | {label[r.variant]} | "
-                 f"{r.AUROC:.3f}{ci_s} | {_f(r.septic_caught_pct, 0)}% | {_f(r.nonseptic_alerted_pct, 0)}% |")
+                 f"{r.AUROC:.3f}{_ci(r.get('AUROC_ci'))} |{rng} {_f(r.septic_caught_pct, 0)}% | "
+                 f"{_f(r.nonseptic_alerted_pct, 0)}% | {_f(r.alert_hours_per_100_patient_days, 0)} |")
     L.append("\nThe alert threshold was always set on the training hospital's own patients "
-             "(to flag about 80% of their septic patients by onset), as it would be before a real rollout.\n")
+             "(to flag about 80% of their septic patients by onset), as it would be before a real rollout. "
+             "\"Patients without sepsis who got an alert\" counts anyone alerted at least once during "
+             "their stay; alert-hours per 100 patient-days shows how much of the time alerts were on.\n")
+    if seed_col:
+        L.append(f"Every model was trained {n_seeds} times with different random seeds. The table shows "
+                 "the average; the interval comes from resampling test patients, and the range shows "
+                 "the lowest and highest AUROC across the separate trainings.\n")
+    else:
+        L.append("Each model was trained once. Neural networks, and domain-adversarial training in "
+                 "particular, can vary between trainings, so differences of a few hundredths should be "
+                 "confirmed with more seeds (`--seeds 0,1,2`).\n")
+
+    if comp is not None and len(comp):
+        L.append("### Does adapting to the new hospital help?\n")
+        L.append("Each line compares a method with using the other hospital's model unchanged, on the "
+                 "same test patients. An interval that includes 0 means no clear difference.\n")
+        L.append("| Model | Trained on → tested on | Compared with no adjustment | Change in AUROC (95% CI) |")
+        L.append("|---|---|---|---|")
+        for _, r in comp.iterrows():
+            L.append(f"| {NAMES[r.model]} | {r.train} → {r.test} | {COMPARED.get(r.compared, r.compared)} | "
+                     f"{r['diff']:+.3f}{_ci(r.diff_ci)} |")
+        L.append("")
 
     L.append("## What the care team would see\n")
     L.append("![trade-off](alert_tradeoff.png)\n")
@@ -185,17 +226,25 @@ def write_report(out: Path, res: pd.DataFrame, qrep: dict, n_bad: int, sub: pd.D
              "to handle; moving up means more septic patients flagged before sepsis onset.\n")
 
     L.append(f"## Does it work equally well for everyone? ({NAMES[main_model]}, trained on both hospitals)\n")
-    L.append("| Group | Patients | Developed sepsis | AUROC | Septic patients flagged | Patients without sepsis alerted |")
+    L.append("| Group | Patients | Developed sepsis | AUROC (95% CI) | Septic patients flagged (95% CI) | "
+             "Patients without sepsis alerted (95% CI) |")
     L.append("|---|---|---|---|---|---|")
     for _, r in sub.iterrows():
-        L.append(f"| {r.group} | {r.patients:,} | {r.septic_patients:,} | {_f(r.AUROC)} | "
-                 f"{_f(r.septic_caught_pct, 0)}% | {_f(r.nonseptic_alerted_pct, 0)}% |")
+        L.append(f"| {r.group} | {r.patients:,} | {r.septic_patients:,} | {_f(r.AUROC)}{_ci(r.get('AUROC_ci'))} | "
+                 f"{_f(r.septic_caught_pct, 0)}%{_ci(r.get('septic_caught_ci'), pct=True)} | "
+                 f"{_f(r.nonseptic_alerted_pct, 0)}%{_ci(r.get('nonseptic_alerted_ci'), pct=True)} |")
+    n_unk = sub.loc[sub.group == "Not recorded", "patients"]
+    if len(n_unk):
+        L.append(f"\nICU type is missing in the source data for {int(n_unk.iloc[0]):,} test patients, so "
+                 "they appear as \"Not recorded\". Small groups have wide intervals; differences "
+                 "between groups whose intervals overlap may be chance.")
     L.append("\n![calibration](calibration.png)\n")
     L.append("Points on the dashed line mean the predicted risk matched what actually happened.\n")
 
     L.append("## Limits\n")
-    L.append("- ICU data from two hospital systems around 2010–2019; one more system was held back "
-             "by the challenge organisers and isn't public.")
+    L.append("- ICU data from two US hospital systems; a third was held back by the challenge "
+             "organisers and isn't public.")
+    L.append("- ICU type is missing for many patients in the source data.")
     L.append("- Sepsis labels follow the challenge's Sepsis-3 definition, which marks hours from 6 hours "
              "before onset.")
     L.append("- No real dates, so the split between training and test patients is random, not by time.")

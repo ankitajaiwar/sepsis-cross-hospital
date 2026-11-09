@@ -1,31 +1,92 @@
 """How well predictions work, hour by hour and as bedside alerts."""
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
 from sklearn.calibration import calibration_curve
 from sklearn.metrics import average_precision_score, brier_score_loss, roc_auc_score
 
 
+class PatientBootstrap:
+    """Resample whole patients with replacement, the same draws for every model.
+
+    Each draw is stored as a count per patient, so AUROC on a draw is a weighted AUROC
+    over the original rows. That makes thousands of draws cheap, and using the same
+    draws for two models gives a paired comparison."""
+
+    def __init__(self, y, groups, n_boot: int = 200, seed: int = 0):
+        self.y = np.asarray(y, dtype=float)
+        _, self.inv = np.unique(np.asarray(groups), return_inverse=True)
+        n_pat = self.inv.max() + 1
+        rng = np.random.default_rng(seed)
+        self.counts = [np.bincount(rng.integers(0, n_pat, n_pat), minlength=n_pat)
+                       for _ in range(n_boot)]
+
+    def _prep(self, p):
+        o = np.argsort(np.asarray(p), kind="mergesort")
+        ps = np.asarray(p)[o]
+        starts = np.flatnonzero(np.r_[True, ps[1:] != ps[:-1]])   # groups of tied scores
+        return o, starts
+
+    def _auc(self, prep, w):
+        o, starts = prep
+        ys, ws = self.y[o], w[o]
+        pos = np.add.reduceat(ws * ys, starts)
+        neg = np.add.reduceat(ws * (1 - ys), starts)
+        P, N = pos.sum(), neg.sum()
+        if P == 0 or N == 0:
+            return np.nan
+        below = np.cumsum(neg) - neg
+        return float((pos * (below + 0.5 * neg)).sum() / (P * N))
+
+    def aurocs(self, p) -> np.ndarray:
+        prep = self._prep(p)
+        return np.array([self._auc(prep, c[self.inv].astype(float)) for c in self.counts])
+
+    def mean_auroc(self, preds) -> tuple[float, list[float], np.ndarray]:
+        """AUROC averaged over several runs (seeds) of a model, with a 95% interval."""
+        point = float(np.mean([roc_auc_score(self.y, p) for p in preds]))
+        with np.errstate(all="ignore"), warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            draws = np.nanmean([self.aurocs(p) for p in preds], axis=0)
+        return point, _ci(draws), draws
+
+
+def _ci(draws) -> list[float]:
+    d = np.asarray(draws)[~np.isnan(draws)]
+    return [float(np.percentile(d, 2.5)), float(np.percentile(d, 97.5))] if len(d) else [np.nan, np.nan]
+
+
+def paired_difference(boot: PatientBootstrap, preds_a, preds_b) -> dict:
+    """AUROC of B minus AUROC of A on the same test patients, with a 95% interval."""
+    a, _, da = boot.mean_auroc(preds_a)
+    b, _, db = boot.mean_auroc(preds_b)
+    d = db - da
+    d = d[~np.isnan(d)]
+    return {"diff": b - a, "diff_ci": _ci(d), "share_of_draws_better": float((d > 0).mean())}
+
+
+def wilson(k: int, n: int, z: float = 1.96) -> list[float]:
+    """95% interval for a proportion, in percent."""
+    if n == 0:
+        return [np.nan, np.nan]
+    ph = k / n
+    den = 1 + z * z / n
+    c = (ph + z * z / (2 * n)) / den
+    h = z * np.sqrt(ph * (1 - ph) / n + z * z / (4 * n * n)) / den
+    return [float(max(0.0, 100 * (c - h))), float(min(100.0, 100 * (c + h)))]
+
+
 def hourly_metrics(y, p, groups=None, n_boot: int = 200, seed: int = 0) -> dict:
-    """AUROC, AUPRC and Brier, with 95% intervals from resampling whole patients."""
+    """AUROC, AUPRC and Brier, with a 95% AUROC interval from resampling whole patients."""
     y, p = np.asarray(y), np.asarray(p)
     out = {"AUROC": float(roc_auc_score(y, p)), "AUPRC": float(average_precision_score(y, p)),
            "Brier": float(brier_score_loss(y, p)), "prevalence": float(y.mean()),
            "mean_pred": float(p.mean())}
     if groups is not None and n_boot:
-        rng = np.random.default_rng(seed)
-        groups = np.asarray(groups)
-        uniq, inv = np.unique(groups, return_inverse=True)
-        rows = [np.flatnonzero(inv == i) for i in range(len(uniq))]
-        a, b = [], []
-        for _ in range(n_boot):
-            pick = np.concatenate([rows[i] for i in rng.integers(0, len(rows), len(rows))])
-            if 0 < y[pick].sum() < len(pick):
-                a.append(roc_auc_score(y[pick], p[pick]))
-                b.append(average_precision_score(y[pick], p[pick]))
-        out["AUROC_ci"] = [float(np.percentile(a, 2.5)), float(np.percentile(a, 97.5))]
-        out["AUPRC_ci"] = [float(np.percentile(b, 2.5)), float(np.percentile(b, 97.5))]
+        out["AUROC_ci"] = PatientBootstrap(y, groups, n_boot, seed).mean_auroc([p])[1]
     return out
 
 
@@ -85,7 +146,7 @@ def tradeoff_curve(meta: pd.DataFrame, p: np.ndarray, targets=range(30, 96, 5)) 
     return pd.DataFrame(rows)
 
 
-def subgroup_table(meta: pd.DataFrame, p: np.ndarray, thr: float) -> pd.DataFrame:
+def subgroup_table(meta: pd.DataFrame, p: np.ndarray, thr: float, n_boot: int = 200) -> pd.DataFrame:
     m = meta.copy()
     m["p"] = p
     m["Age group"] = pd.cut(m["Age"], [0, 45, 65, 80, 200], right=False,
@@ -99,9 +160,16 @@ def subgroup_table(meta: pd.DataFrame, p: np.ndarray, thr: float) -> pd.DataFram
         for g, d in m.groupby(key, observed=True):
             y = d["SepsisLabel"].to_numpy()
             am = alert_metrics(d, d["p"].to_numpy(), thr)
+            pts = _patient_view(d, d["p"].to_numpy(), thr)
+            sep, non = pts[pts["septic"]], pts[~pts["septic"]]
+            ok = 0 < y.sum() < len(y)
+            auc, ci = (PatientBootstrap(y, d["person_id"], n_boot).mean_auroc([d["p"].to_numpy()])[:2]
+                       if ok and n_boot else (roc_auc_score(y, d["p"]) if ok else np.nan, [np.nan, np.nan]))
             rows.append({"attribute": col, "group": f"Hospital {g}" if col == "Hospital" else str(g),
                          "patients": am["patients"], "septic_patients": am["septic_patients"],
-                         "AUROC": roc_auc_score(y, d["p"]) if 0 < y.sum() < len(y) else np.nan,
+                         "AUROC": auc, "AUROC_ci": ci,
                          "septic_caught_pct": am["septic_caught_pct"],
-                         "nonseptic_alerted_pct": am["nonseptic_alerted_pct"]})
+                         "septic_caught_ci": wilson(int(sep["caught"].sum()), len(sep)),
+                         "nonseptic_alerted_pct": am["nonseptic_alerted_pct"],
+                         "nonseptic_alerted_ci": wilson(int(non["alerted"].sum()), len(non))})
     return pd.DataFrame(rows)
