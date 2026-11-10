@@ -54,3 +54,13 @@ def test_caught_at_fixed_alerts():
     # alert half of the non-septic patients -> threshold at their median peak (0.5)
     assert caught_at_fixed_alerts(m, p, 50) == 100.0
     assert caught_at_fixed_alerts(m, p, 0) == 50.0      # threshold 0.8: only patient 3 flagged in time
+
+
+def test_shared_features_drops_measurements_missing_at_one_hospital(tmp_path):
+    # synthetic hospital B never records EtCO2, like the real data
+    run(tmp_path, synthetic=True, limit=120, budgets=[5], seeds=(0,), gbm_iter=10,
+        strategies=("random",), shared_features=True, log=lambda s: None)
+    import json
+    cfg = json.loads((tmp_path / "active_config.json").read_text())
+    assert cfg["shared_features"] and any(f.startswith("EtCO2") for f in cfg["dropped_features"])
+    assert "left out" in (tmp_path / "ACTIVE_REPORT.md").read_text()

@@ -18,9 +18,12 @@ def _logit(p):
 class GBMModel:
     def __init__(self, neg_rate: float = 0.3, max_iter: int = 300, seed: int = 0):
         self.neg_rate = neg_rate
+        # early_stopping is off on purpose: scikit-learn's default ("auto") would hold out a
+        # random 10% of training *hours*, so hours of the same patient would sit on both sides
+        # and the number of trees used would vary from run to run. Every model uses max_iter trees.
         self.clf = HistGradientBoostingClassifier(
             learning_rate=0.05, max_iter=max_iter, max_leaf_nodes=31, min_samples_leaf=200,
-            l2_regularization=1.0, random_state=seed)
+            l2_regularization=1.0, early_stopping=False, random_state=seed)
         self.platt = None
         self.seed = seed
 
@@ -57,8 +60,8 @@ def importance_weights(X_src: pd.DataFrame, X_tgt: pd.DataFrame, n: int = 200_00
     rng = np.random.default_rng(seed)
     s = X_src.iloc[rng.choice(len(X_src), min(n, len(X_src)), replace=False)]
     t = X_tgt.iloc[rng.choice(len(X_tgt), min(n, len(X_tgt)), replace=False)]
-    dom = HistGradientBoostingClassifier(max_iter=150, learning_rate=0.1,
-                                         min_samples_leaf=500, random_state=seed)
+    dom = HistGradientBoostingClassifier(max_iter=150, learning_rate=0.1, min_samples_leaf=500,
+                                         early_stopping=False, random_state=seed)
     cols = [c for c in s.columns if s[c].notna().any() and t[c].notna().any()]
     dom.fit(pd.concat([s[cols], t[cols]]), np.r_[np.zeros(len(s)), np.ones(len(t))])
     p = dom.predict_proba(X_src[cols])[:, 1]

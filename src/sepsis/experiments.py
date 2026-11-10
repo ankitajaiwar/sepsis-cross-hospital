@@ -66,7 +66,9 @@ def run_all(df: pd.DataFrame, X_raw: pd.DataFrame, X_norm: pd.DataFrame, df_norm
     for mt in models:
         for setting, src, tests in PLANS:
             for var in _variants(mt, setting):
-                cfg = f"epochs{epochs}" if mt == "gru" else f"iter{gbm_iter}"
+                # "noES": trees trained without early stopping (Nov 2026); older cached tree
+                # runs used scikit-learn's implicit early stopping and are not reused
+                cfg = f"epochs{epochs}" if mt == "gru" else f"iter{gbm_iter}noES"
                 key = f"{mt}:{setting}:{'+'.join(src)}:{var}:{cfg}"
                 for seed in seeds:
                     t0 = time.time()

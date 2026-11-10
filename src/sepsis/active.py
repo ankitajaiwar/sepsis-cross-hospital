@@ -57,7 +57,8 @@ BASELINES = ["recalibrate", "target_only"]
 DEFAULT_BUDGETS = [25, 50, 100, 200, 400]
 MIN_SEPTIC_FOR_THRESHOLD = 3     # fewer labelled septic patients -> keep the original threshold
 FIXED_ALERT_PCT = 20.0           # operating point for comparing ranking at the bedside
-RESULTS_VERSION = 2              # bump when result columns change, so old checkpoints are not reused
+RESULTS_VERSION = 3              # bump when results change meaning, so old checkpoints are not reused
+GBM_TREES = 300                  # same as the main pipeline, so the 'model as-is' baseline matches
 
 
 # ---------- patient-level summaries ----------
@@ -91,7 +92,8 @@ def k_center(emb: np.ndarray, k: int, seed: int = 0) -> list[int]:
 
 def domain_scores(emb_src: pd.DataFrame, emb_tgt: pd.DataFrame, seed: int = 0) -> pd.Series:
     """P(target hospital | patient summary) for target patients. Uses no labels."""
-    clf = HistGradientBoostingClassifier(max_iter=150, learning_rate=0.1, random_state=seed)
+    clf = HistGradientBoostingClassifier(max_iter=150, learning_rate=0.1, early_stopping=False,
+                                         random_state=seed)
     Xd = pd.concat([emb_src, emb_tgt])
     yd = np.r_[np.zeros(len(emb_src)), np.ones(len(emb_tgt))]
     # out-of-fold scores for the target patients, so the classifier isn't scoring its own training data
@@ -391,7 +393,7 @@ def fig_curves(summ: pd.DataFrame, metric: str, ylabel: str, title: str, path: P
 
 
 def write_report(out: Path, summ: pd.DataFrame, budgets, seeds, target_weight, synthetic,
-                 weight_by: str = "hour"):
+                 weight_by: str = "hour", dropped_features=()):
     L = ["# Which patients should a new hospital label?\n"]
     if synthetic:
         L.append("> **Made-up test data.** These numbers only show the code runs.\n")
@@ -402,6 +404,9 @@ def write_report(out: Path, summ: pd.DataFrame, budgets, seeds, target_weight, s
              f"retrained on the original hospital's data plus the newly labelled patients ({per} "
              f"weighted {target_weight:g}x), and tested on held-out patients at the new hospital. "
              f"Results are averaged over {len(seeds)} random seeds.\n")
+    if dropped_features:
+        L.append(f"Only measurements recorded at both hospitals were used; "
+                 f"{len(dropped_features)} features were left out: {', '.join(dropped_features)}.\n")
     L.append("Two comparison methods label the same random patients as *Random*: *Threshold reset "
              "only* keeps the original model and only resets its alert threshold on the labelled "
              "patients; *New hospital only* trains on the labelled patients alone.\n")
@@ -466,8 +471,8 @@ def prepare(raw: str | None, omop: str | None, synthetic_dir: Path | None, limit
 
 
 def run(out: Path, raw="data/raw", omop=None, synthetic=False, budgets=DEFAULT_BUDGETS, seeds=(0, 1, 2),
-        strategies=tuple(STRATEGIES + BASELINES), target_weight=10.0, catch_target=80.0, gbm_iter=200,
-        limit=0, weight_by="hour", log=print):
+        strategies=tuple(STRATEGIES + BASELINES), target_weight=1.0, catch_target=80.0,
+        gbm_iter=GBM_TREES, limit=0, weight_by="hour", shared_features=False, log=print):
     out.mkdir(parents=True, exist_ok=True)
     syn = None
     if synthetic:
@@ -475,10 +480,19 @@ def run(out: Path, raw="data/raw", omop=None, synthetic=False, budgets=DEFAULT_B
         syn = out / "synthetic_raw"
         write_synthetic(syn, n_per_site=limit or 400)
     X, meta = prepare(raw, omop, syn, 0 if synthetic else limit)
+    dropped = []
+    if shared_features:
+        # keep only features recorded at both hospitals (e.g. drops EtCO2, never recorded at B),
+        # so labelled patients can't teach the model a measurement the source hospital lacks
+        both = [c for c in X.columns
+                if all(X.loc[(meta.site == s).to_numpy(), c].notna().any() for s in ("A", "B"))]
+        dropped = [c for c in X.columns if c not in both]
+        X = X[both]
+        log(f"Shared features only: dropped {len(dropped)} ({', '.join(dropped)})")
     # checkpoints are kept per settings, so changing budgets etc. never mixes old and new results
     cfg = {"budgets": list(budgets), "target_weight": target_weight, "catch_target": catch_target,
            "gbm_iter": gbm_iter, "limit": limit, "synthetic": synthetic, "weight_by": weight_by,
-           "version": RESULTS_VERSION}
+           "shared_features": shared_features, "version": RESULTS_VERSION}
     key = hashlib.sha1(json.dumps(cfg, sort_keys=True).encode()).hexdigest()[:10]
     ckpt = out / "checkpoints" / key
     ckpt.mkdir(parents=True, exist_ok=True)
@@ -499,11 +513,12 @@ def run(out: Path, raw="data/raw", omop=None, synthetic=False, budgets=DEFAULT_B
     fig_curves(summ, "tgt_septic_caught_pct", "Septic patients flagged by onset (%)",
                "Septic patients flagged, threshold reset on the labelled new-hospital patients",
                out / "active_caught_tgt.png")
-    write_report(out, summ, budgets, seeds, target_weight, synthetic, weight_by)
+    write_report(out, summ, budgets, seeds, target_weight, synthetic, weight_by, dropped)
     (out / "active_config.json").write_text(json.dumps(
         {"budgets": list(budgets), "seeds": list(seeds), "strategies": list(strategies),
          "target_weight": target_weight, "weight_by": weight_by, "catch_target": catch_target,
-         "gbm_iter": gbm_iter}, indent=2))
+         "gbm_iter": gbm_iter, "shared_features": shared_features, "dropped_features": dropped},
+        indent=2))
     return res
 
 
@@ -517,17 +532,21 @@ def main():
     ap.add_argument("--seeds", type=int, default=3)
     ap.add_argument("--strategies", default=",".join(STRATEGIES + BASELINES),
                     help="comma-separated; also accepts the comparison methods recalibrate, target_only")
-    ap.add_argument("--target-weight", type=float, default=10.0)
+    ap.add_argument("--target-weight", type=float, default=1.0,
+                    help="weight of labelled new-hospital data (1 = counted like source data)")
     ap.add_argument("--weight-by", choices=["hour", "patient"], default="hour",
                     help="apply --target-weight to each labelled hour, or give each labelled patient "
                          "the same total weight regardless of stay length")
+    ap.add_argument("--shared-features", action="store_true",
+                    help="use only features recorded at both hospitals (drops e.g. EtCO2)")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--fast", action="store_true")
     a = ap.parse_args()
     t0 = time.time()
     run(Path(a.out), a.raw, a.omop, a.synthetic, [int(b) for b in a.budgets.split(",")],
         tuple(range(1 if a.fast else a.seeds)), a.strategies.split(","), a.target_weight,
-        gbm_iter=80 if a.fast else 200, limit=a.limit, weight_by=a.weight_by)
+        gbm_iter=80 if a.fast else GBM_TREES, limit=a.limit, weight_by=a.weight_by,
+        shared_features=a.shared_features)
     print(f"Done in {(time.time() - t0) / 60:.1f} min -> {Path(a.out) / 'ACTIVE_REPORT.md'}")
 
 
