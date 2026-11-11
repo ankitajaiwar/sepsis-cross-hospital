@@ -58,17 +58,18 @@ the gaps and errors left in on purpose.
 
 ## Results
 
-From the full run (one training run per model; details and confidence intervals in [docs/REPORT.md](docs/REPORT.md)):
+From the full run, every model trained 5 times with different seeds (details and confidence intervals in [docs/REPORT.md](docs/REPORT.md)):
 
 | Trained on | Trees, tested at A | Trees, tested at B | GRU, tested at A | GRU, tested at B |
 |---|---|---|---|---|
-| Same hospital | 0.813 | 0.846 | 0.798 | 0.830 |
-| Other hospital | 0.743 | 0.734 | 0.732 | 0.746 |
-| Both hospitals | 0.820 | 0.845 | 0.814 | 0.838 |
+| Same hospital | 0.811 | 0.847 | 0.797 | 0.831 |
+| Other hospital | 0.747 | 0.739 | 0.731 | 0.752 |
+| Both hospitals | 0.818 | 0.846 | 0.800 | 0.835 |
 
-- **Accuracy drops at a new hospital.** AUROC fell by 0.07–0.11 when a model was used at the hospital it wasn't trained on. Training on both hospitals matched each hospital's own model.
-- **Alert thresholds don't carry over.** With the threshold set to flag about 80% of septic patients at the training hospital, the hospital B model alerted 60% of patients without sepsis at hospital A (A's own model: 35%). The other way round, A's model flagged only 53% of B's septic patients before onset (B's own model: 82%).
-- **Label-free adjustments were not consistent.** No method helped in both directions in this run; repeated training runs and the which-patients-to-label experiments are next.
+- **Accuracy drops at a new hospital.** AUROC fell by 0.06–0.11 when a model was used at the hospital it wasn't trained on. Training on both hospitals matched each hospital's own model.
+- **Alert thresholds don't carry over.** With the threshold set to flag about 80% of septic patients at the training hospital, the hospital B tree model alerted 58% of patients without sepsis at hospital A (A's own model: 37%). The other way round, A's model flagged only 53% of B's septic patients before onset (B's own model: 80%).
+- **Label-free adjustments were not reliable.** Domain-adversarial training improved the GRU moved from A to B by 0.037 (95% CI 0.020–0.057) but lowered it from B to A by 0.017 (0.007–0.030). Adjusting to local norms lowered the trees from B to A by 0.027; importance weighting changed AUROC by at most 0.011.
+- **Labelling some patients at the new hospital** (`active.py`, in progress): with 400 randomly chosen patients, AUROC rose by 0.02–0.04 in both directions. Choosing patients least like the original hospital did better than random from A to B, but no strategy beat random from B to A. These are 3-seed results; see [docs/LAB_NOTEBOOK.md](docs/LAB_NOTEBOOK.md).
 
 ## Running it
 
@@ -77,7 +78,7 @@ You need Python 3.10 or newer and about 8 GB of free memory for the full dataset
 **Mac / Linux**
 ```bash
 pip install -r requirements.txt
-make test        # 19 tests on made-up data, a few minutes
+make test        # 21 tests on made-up data, a few minutes
 make data        # downloads the 40,336 patient files (resumable)
 make run         # full analysis, roughly 30-60 minutes on a laptop
 make active      # which-patients-to-label experiments, a few hours (run after `make run`)
@@ -119,6 +120,8 @@ For a quick trial on part of the data: `python -m sepsis.pipeline --raw data/raw
 | `report.py` | Charts and the written report |
 | `active.py` | Which-patients-to-label experiments |
 | `api.py` | Scoring web service |
+
+More detail: [docs/TECHNICAL_REFERENCE.md](docs/TECHNICAL_REFERENCE.md) explains every step, parameter and design choice; [docs/LAB_NOTEBOOK.md](docs/LAB_NOTEBOOK.md) records each experiment, its results and the decisions that followed.
 
 ## Limits
 
