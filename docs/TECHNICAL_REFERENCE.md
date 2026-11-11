@@ -1,6 +1,6 @@
 # Sepsis cross-hospital project: full technical reference
 
-Describes the code as of commit `41a271f` (Nov 10, 2026). Experiment log and results: [LAB_NOTEBOOK.md](LAB_NOTEBOOK.md).
+Describes the code as of Nov 11, 2026 (cross-fitted reset threshold added). Experiment log and results: [LAB_NOTEBOOK.md](LAB_NOTEBOOK.md).
 
 ## How to read this document
 
@@ -375,7 +375,8 @@ Each round gets several columns (`active_results.csv`). The first run had only t
 | Flagged at 20% alerts (added Nov 9) | share of septic patients flagged by onset when the threshold is chosen *on the test patients* so that 20% of non-septic patients are alerted | compares ranking at the bedside with threshold effects removed; like AUROC, it is an evaluation metric, not a deployable threshold |
 | Patients labelled, of them septic, hours labelled | counts | hours added on Nov 9 because patients alone hide how much weight a strategy adds |
 
-- ⚠ Check (written in the report): for retrained models, the reset threshold is set on patients the model was trained on, so it is likely set too high and flags fewer test patients than intended. Threshold reset only does not have this problem. Cross-fitting would fix it if needed.
+- **Cross-fitting (since Nov 11).** For retrained models, the reset threshold used to be set on the retrained model's own scores for the labelled patients. Those patients were in its training data, so their scores were too high, and the threshold flagged only 2–30% of septic test patients (Nov 11 base run). Now the labelled patients are split into 3 groups (`--crossfit-folds 3`); each group is scored by a model trained without it, and the threshold is set on these out-of-fold scores. It costs 3 extra trainings per round, and only runs when ≥ 3 septic patients are labelled. `--crossfit-folds 0` restores the old in-sample behaviour. Threshold reset only never trains on the labelled patients, so it uses its own scores.
+- ⚠ Check: the fold models are calibrated on the same source validation patients as the final model, so their score scale is close but not identical. This is the usual cross-fitting approximation; state it in the methods.
 - ⚠ Check: the worst group uses age and sex only; the main pipeline's subgroup table also includes ICU unit. Fine, but say which in each table.
 
 ### 7.5 Reference points
@@ -383,7 +384,7 @@ Each round gets several columns (`active_results.csv`). The first run had only t
 - **All target labels:** source training patients plus *all* new-hospital training patients at the same weight. ⚠ Check: it is "source + all target labels", not "target only". Describe it that way in the paper.
 
 ### 7.6 Command-line options and outputs
-`--raw`, `--omop` (reuse OMOP tables from the pipeline), `--out`, `--synthetic`, `--budgets 25,50,100,200,400`, `--seeds 3`, `--strategies` (default: all six plus the two comparison methods), `--target-weight 1`, `--weight-by hour|patient`, `--shared-features` (use only features recorded at both hospitals; drops the 5 EtCO2 features, added Nov 10), `--limit`, `--fast` (1 seed, 80 trees).
+`--raw`, `--omop` (reuse OMOP tables from the pipeline), `--out`, `--synthetic`, `--budgets 25,50,100,200,400`, `--seeds 3`, `--strategies` (default: all six plus the two comparison methods), `--target-weight 1`, `--weight-by hour|patient`, `--shared-features` (use only features recorded at both hospitals; drops the 5 EtCO2 features, added Nov 10), `--crossfit-folds 3` (added Nov 11), `--limit`, `--fast` (1 seed, 80 trees).
 - ⚠ Note: `--seeds` here is a **count** (`--seeds 5` runs seeds 0–4), while in the pipeline it is a **list** (`--seeds 0,1,2,3,4`).
 - Fixed in code: catch target 80%, 300 trees (`GBM_TREES`), no early stopping, minimum 3 septic patients to reset the threshold, fixed operating point 20%.
 
@@ -430,7 +431,7 @@ Most are about clear wording, not errors.
 | 8 | Greedy k-centre picks outliers first | Diversity is poor at small budgets for a known reason | Mention; consider a k-means++ or density-weighted variant |
 | 9 | Per-hour weighting favours long stays; 10x weight distorted targeted strategies | Confirmed Nov 10: 1x > 3x > 10x | Default now 1x; justify 1x a priori or check on validation patients; report 3x/10x as sensitivity |
 | 10 | "All target labels" = source + target at 10x | Not a pure target-only upper bound | Describe accurately; `target_only` with a full budget gives the other version |
-| 11 | Reset threshold for retrained models is in-sample | Biased towards flagging too few | Caveat (in report); cross-fit if it matters |
+| 11 | ~~Reset threshold for retrained models was in-sample.~~ **Fixed Nov 11**: 3-fold cross-fitting | In-sample version flagged only 2–30% | Describe cross-fitting in the methods |
 | 12 | DANN model selection uses source validation; λ = 0.3 not tuned | Explains seed variability; reviewers ask | One sentence in methods |
 | 13 | No hyperparameter tuning anywhere | Reviewers ask | State fixed defaults, chosen before cross-hospital testing, the same for all settings |
 | 14 | Pipeline cache key ignores code version | Old predictions could be mixed in after code changes | Delete `artifacts/runs` after changing model or feature code |
@@ -470,7 +471,7 @@ Most are about clear wording, not errors.
 | Active | hybrid candidate pool | top 3 × k by averaged rank |
 | Active | hospital classifier | HistGB 150 trees, lr 0.1, 3-fold out-of-fold |
 | Active | worst group | age band or sex with ≥ 5 septic test patients |
-| Active | reset threshold | needs ≥ 3 labelled septic patients |
+| Active | reset threshold | needs ≥ 3 labelled septic patients; out-of-fold scores, 3 folds, for retrained models |
 | Active | fixed operating point | 20% of non-septic test patients alerted |
 
 ---

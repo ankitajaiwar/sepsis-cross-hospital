@@ -78,7 +78,7 @@ You need Python 3.10 or newer and about 8 GB of free memory for the full dataset
 **Mac / Linux**
 ```bash
 pip install -r requirements.txt
-make test        # 21 tests on made-up data, a few minutes
+make test        # 22 tests on made-up data, about 10-15 minutes
 make data        # downloads the 40,336 patient files (resumable)
 make run         # full analysis, roughly 30-60 minutes on a laptop
 make active      # which-patients-to-label experiments, a few hours (run after `make run`)

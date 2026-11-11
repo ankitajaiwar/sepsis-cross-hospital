@@ -121,8 +121,12 @@ At 25 patients each strategy labels exactly the same patients at every weight, s
 - **Hypotheses for B→A (untested):** (1) the hospitals may differ partly in outcomes given the same measurements (labelling or care practice), so a biased sample of the new hospital misleads while a random one represents it; (2) targeted picks are septic-heavy (hybrid ~40% septic vs ~10% random) and long-stay, which may distort the base rate the model learns.
 - Possible checks: `--weight-by patient`; compare `target_only` across directions; hospital classifier AUROC per direction.
 
+### Code change: cross-fitted reset threshold
+- **Decision:** 3-fold cross-fitting rather than holding back labelled patients for threshold setting. Holding patients back would change the AUROC results; cross-fitting keeps every labelled patient in training and only costs run time.
+- For retrained models, the labelled patients are split into 3 groups; each group is scored by a model trained without it, and the reset threshold is set on these out-of-fold scores. About 3 extra trainings per round, only when ≥ 3 septic patients are labelled.
+
 ### Next
-1. Fix the reset threshold for retrained models (cross-fitting, or a held-back share of labelled patients).
+1. ~~Fix the reset threshold for retrained models.~~ Done (cross-fitting).
 2. Full 5-seed run: all features, all strategies plus `recalibrate` and `target_only`.
 3. Paired bootstrap comparisons vs random at each budget, from saved predictions.
 4. Later: wider budgets, ICULOS/HospAdmTime ablation, qSOFA/NEWS2 baselines, challenge utility score, eICU after credentialing.

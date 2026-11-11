@@ -64,3 +64,13 @@ def test_shared_features_drops_measurements_missing_at_one_hospital(tmp_path):
     cfg = json.loads((tmp_path / "active_config.json").read_text())
     assert cfg["shared_features"] and any(f.startswith("EtCO2") for f in cfg["dropped_features"])
     assert "left out" in (tmp_path / "ACTIVE_REPORT.md").read_text()
+
+
+def test_crossfit_threshold_runs_and_is_recorded(tmp_path):
+    import json
+    res = run(tmp_path, synthetic=True, limit=150, budgets=[30], seeds=(0,), gbm_iter=10,
+              strategies=("random", "high_risk"), crossfit_folds=3, log=lambda s: None)
+    assert json.loads((tmp_path / "active_config.json").read_text())["crossfit_folds"] == 3
+    r = res[(res.strategy == "high_risk") & (res.budget == 30)].iloc[0]
+    assert r.tgt_threshold_from_target == 1 and 0 <= r.tgt_septic_caught_pct <= 100
+    assert "out-of-fold" in (tmp_path / "ACTIVE_REPORT.md").read_text()

@@ -57,7 +57,8 @@ BASELINES = ["recalibrate", "target_only"]
 DEFAULT_BUDGETS = [25, 50, 100, 200, 400]
 MIN_SEPTIC_FOR_THRESHOLD = 3     # fewer labelled septic patients -> keep the original threshold
 FIXED_ALERT_PCT = 20.0           # operating point for comparing ranking at the bedside
-RESULTS_VERSION = 3              # bump when results change meaning, so old checkpoints are not reused
+RESULTS_VERSION = 4              # bump when results change meaning, so old checkpoints are not reused
+CROSSFIT_FOLDS = 3               # reset threshold for retrained models from out-of-fold scores
 GBM_TREES = 300                  # same as the main pipeline, so the 'model as-is' baseline matches
 
 
@@ -196,13 +197,18 @@ def _target_threshold(m_lab: pd.DataFrame, p_lab: np.ndarray, catch_target: floa
 
 def run_direction(X, meta, src: str, tgt: str, budgets, strategies, seeds, target_weight: float,
                   catch_target: float, gbm_iter: int, log=print, ckpt: Path | None = None,
-                  weight_by: str = "hour") -> pd.DataFrame:
+                  weight_by: str = "hour", crossfit_folds: int = CROSSFIT_FOLDS) -> pd.DataFrame:
     """With ckpt, results are saved after every (seed, strategy), so a stopped run can be
     restarted with the same command and only the unfinished parts are run again.
 
     weight_by="hour": every labelled new-hospital hour counts `target_weight` times.
     weight_by="patient": each labelled patient carries the same total weight
-    (`target_weight` x the average stay length), however long their stay."""
+    (`target_weight` x the average stay length), however long their stay.
+
+    crossfit_folds: for models retrained on the labelled patients, the reset threshold is set
+    on out-of-fold scores (labelled patients split into this many groups; each group scored by
+    a model trained without it), because the retrained model's own scores on patients it was
+    trained on are too high. 0 = use the retrained model's own scores (in-sample)."""
     sel = lambda site, split: meta.index[(meta.site == site) & (meta.split == split)]
     s_tr, s_va = sel(src, "train"), sel(src, "valid")
     t_pool_rows, t_te = sel(tgt, "train"), sel(tgt, "test")
@@ -245,19 +251,42 @@ def run_direction(X, meta, src: str, tgt: str, budgets, strategies, seeds, targe
         m.calibrate(X.loc[s_va], meta.loc[s_va, "SepsisLabel"].to_numpy())
         return m
 
-    def score(model, lab_pids, threshold_model=None):
+    def oof_scores(seed, lab_pids, target_only):
+        """Out-of-fold scores for the labelled patients' hours (NaN where a fold model
+        couldn't be trained)."""
+        pids = np.asarray(lab_pids)
+        fold = np.random.default_rng(seed + 7919).permutation(len(pids)) % crossfit_folds
+        li = lab_rows(lab_pids)
+        pid_li = pid.loc[li].to_numpy()
+        out = pd.Series(np.nan, index=li)
+        for f in range(crossfit_folds):
+            held = pids[fold == f]
+            m = fit(seed, list(pids[fold != f]), target_only)
+            if m is None or not len(held):
+                continue
+            rows = li[np.isin(pid_li, held)]
+            out.loc[rows] = m.predict(X.loc[rows])
+        return out
+
+    def score(model, lab_pids, retrained_seed=None, target_only=False):
         """Evaluate `model` on the test patients. The original-hospital threshold comes from
-        `threshold_model` (defaults to `model`); the new-hospital threshold from the labelled
-        patients' scores under `model`."""
+        the source validation patients; the new-hospital threshold from the labelled patients,
+        using out-of-fold scores when the model was retrained on them (retrained_seed given)."""
         if model is None:
             return {}, np.full(len(t_te), np.nan, dtype="float32")
         p_te = model.predict(X.loc[t_te])
-        tm = threshold_model or model
-        thr_src = threshold_for_catch_rate(meta.loc[s_va], tm.predict(X.loc[s_va]), catch_target)
+        thr_src = threshold_for_catch_rate(meta.loc[s_va], model.predict(X.loc[s_va]), catch_target)
         thr_tgt = None
         if len(lab_pids):
             li = lab_rows(lab_pids)
-            thr_tgt = _target_threshold(meta.loc[li], model.predict(X.loc[li]), catch_target)
+            m_lab = meta.loc[li]
+            if m_lab.loc[m_lab["onset_hour"].notna(), "person_id"].nunique() >= MIN_SEPTIC_FOR_THRESHOLD:
+                if retrained_seed is not None and crossfit_folds > 1:
+                    p_lab = oof_scores(retrained_seed, lab_pids, target_only)
+                    ok = p_lab.notna().to_numpy()
+                    thr_tgt = _target_threshold(m_lab[ok], p_lab.to_numpy()[ok], catch_target)
+                else:
+                    thr_tgt = _target_threshold(m_lab, model.predict(X.loc[li]), catch_target)
         return _evaluate(p_te, m_te, thr_src, thr_tgt), p_te.astype("float32")
 
     tag = f"{src}-{tgt}"
@@ -309,8 +338,9 @@ def run_direction(X, meta, src: str, tgt: str, budgets, strategies, seeds, targe
                 if strat == "recalibrate":
                     res, p_te = score(base, labelled)
                 else:
-                    model = fit(seed, labelled, target_only=(strat == "target_only"))
-                    res, p_te = score(model, labelled)
+                    t_only = strat == "target_only"
+                    model = fit(seed, labelled, target_only=t_only)
+                    res, p_te = score(model, labelled, retrained_seed=seed, target_only=t_only)
                     if model is None:
                         model = base
                 lab_meta = meta.loc[lab_rows(labelled)]
@@ -393,7 +423,7 @@ def fig_curves(summ: pd.DataFrame, metric: str, ylabel: str, title: str, path: P
 
 
 def write_report(out: Path, summ: pd.DataFrame, budgets, seeds, target_weight, synthetic,
-                 weight_by: str = "hour", dropped_features=()):
+                 weight_by: str = "hour", dropped_features=(), crossfit_folds: int = CROSSFIT_FOLDS):
     L = ["# Which patients should a new hospital label?\n"]
     if synthetic:
         L.append("> **Made-up test data.** These numbers only show the code runs.\n")
@@ -448,9 +478,10 @@ def write_report(out: Path, summ: pd.DataFrame, budgets, seeds, target_weight, s
     L.append(f"**Reset threshold:** set on the labelled new-hospital patients to flag about 80% of "
              f"them. It needs at least {MIN_SEPTIC_FOR_THRESHOLD} labelled septic patients; otherwise "
              "the original threshold is kept, and the share of seeds where it could be reset is shown "
-             "in brackets. For retrained models the labelled patients were also used for training, so "
-             "this threshold is set on patients the model has seen and may flag fewer test patients "
-             "than intended. *Threshold reset only* does not have this problem.\n")
+             "in brackets. For models retrained on the labelled patients, the threshold is set on "
+             f"out-of-fold scores ({crossfit_folds} folds: each group of labelled patients is scored by a "
+             "model trained without it), because a model's scores on patients it was trained on are "
+             "too high. *Threshold reset only* never trains on them, so it uses its own scores.\n")
     L.append("**Worst group:** the lowest share of septic patients flagged in any age group or sex "
              "with at least 5 septic patients.\n")
     (out / "ACTIVE_REPORT.md").write_text("\n".join(L) + "\n", encoding="utf-8")
@@ -472,7 +503,8 @@ def prepare(raw: str | None, omop: str | None, synthetic_dir: Path | None, limit
 
 def run(out: Path, raw="data/raw", omop=None, synthetic=False, budgets=DEFAULT_BUDGETS, seeds=(0, 1, 2),
         strategies=tuple(STRATEGIES + BASELINES), target_weight=1.0, catch_target=80.0,
-        gbm_iter=GBM_TREES, limit=0, weight_by="hour", shared_features=False, log=print):
+        gbm_iter=GBM_TREES, limit=0, weight_by="hour", shared_features=False,
+        crossfit_folds=CROSSFIT_FOLDS, log=print):
     out.mkdir(parents=True, exist_ok=True)
     syn = None
     if synthetic:
@@ -492,13 +524,14 @@ def run(out: Path, raw="data/raw", omop=None, synthetic=False, budgets=DEFAULT_B
     # checkpoints are kept per settings, so changing budgets etc. never mixes old and new results
     cfg = {"budgets": list(budgets), "target_weight": target_weight, "catch_target": catch_target,
            "gbm_iter": gbm_iter, "limit": limit, "synthetic": synthetic, "weight_by": weight_by,
-           "shared_features": shared_features, "version": RESULTS_VERSION}
+           "shared_features": shared_features, "crossfit_folds": crossfit_folds,
+           "version": RESULTS_VERSION}
     key = hashlib.sha1(json.dumps(cfg, sort_keys=True).encode()).hexdigest()[:10]
     ckpt = out / "checkpoints" / key
     ckpt.mkdir(parents=True, exist_ok=True)
     (ckpt / "settings.json").write_text(json.dumps(cfg, indent=2))
     res = pd.concat([run_direction(X, meta, s, t, budgets, strategies, seeds, target_weight,
-                                   catch_target, gbm_iter, log, ckpt, weight_by)
+                                   catch_target, gbm_iter, log, ckpt, weight_by, crossfit_folds)
                      for s, t in [("A", "B"), ("B", "A")]])
     res.to_csv(out / "active_results.csv", index=False)
     summ = summarize(res)
@@ -513,11 +546,12 @@ def run(out: Path, raw="data/raw", omop=None, synthetic=False, budgets=DEFAULT_B
     fig_curves(summ, "tgt_septic_caught_pct", "Septic patients flagged by onset (%)",
                "Septic patients flagged, threshold reset on the labelled new-hospital patients",
                out / "active_caught_tgt.png")
-    write_report(out, summ, budgets, seeds, target_weight, synthetic, weight_by, dropped)
+    write_report(out, summ, budgets, seeds, target_weight, synthetic, weight_by, dropped, crossfit_folds)
     (out / "active_config.json").write_text(json.dumps(
         {"budgets": list(budgets), "seeds": list(seeds), "strategies": list(strategies),
          "target_weight": target_weight, "weight_by": weight_by, "catch_target": catch_target,
-         "gbm_iter": gbm_iter, "shared_features": shared_features, "dropped_features": dropped},
+         "gbm_iter": gbm_iter, "shared_features": shared_features, "dropped_features": dropped,
+         "crossfit_folds": crossfit_folds},
         indent=2))
     return res
 
@@ -539,6 +573,8 @@ def main():
                          "the same total weight regardless of stay length")
     ap.add_argument("--shared-features", action="store_true",
                     help="use only features recorded at both hospitals (drops e.g. EtCO2)")
+    ap.add_argument("--crossfit-folds", type=int, default=CROSSFIT_FOLDS,
+                    help="folds for the reset threshold of retrained models (0 = in-sample scores)")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--fast", action="store_true")
     a = ap.parse_args()
@@ -546,7 +582,7 @@ def main():
     run(Path(a.out), a.raw, a.omop, a.synthetic, [int(b) for b in a.budgets.split(",")],
         tuple(range(1 if a.fast else a.seeds)), a.strategies.split(","), a.target_weight,
         gbm_iter=80 if a.fast else GBM_TREES, limit=a.limit, weight_by=a.weight_by,
-        shared_features=a.shared_features)
+        shared_features=a.shared_features, crossfit_folds=a.crossfit_folds)
     print(f"Done in {(time.time() - t0) / 60:.1f} min -> {Path(a.out) / 'ACTIVE_REPORT.md'}")
 
 
