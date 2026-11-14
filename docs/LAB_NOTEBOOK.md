@@ -133,6 +133,47 @@ At 25 patients each strategy labels exactly the same patients at every weight, s
 
 ---
 
+## Nov 13: full active learning run (5 seeds)
+
+**Setup.** Code at `a0e91b4`: all six strategies plus `recalibrate` and `target_only`, budgets 25 / 50 / 100 / 200 / 400, 5 seeds, 1x weight per hour, 300 trees, no early stopping, all features, reset threshold for retrained models on 3-fold out-of-fold scores. Per-round test predictions saved in `artifacts_active_full/checkpoints/*/preds/`.
+
+### AUROC (5-seed mean)
+
+| Strategy | A→B 25 / 50 / 100 / 200 / 400 | B→A 25 / 50 / 100 / 200 / 400 |
+|---|---|---|
+| Random | 0.743 / 0.746 / 0.765 / 0.776 / 0.787 | 0.750 / 0.753 / 0.752 / 0.756 / 0.763 |
+| Least like source | 0.745 / 0.751 / 0.769 / 0.782 / 0.797 | 0.749 / 0.750 / 0.751 / 0.752 / 0.747 |
+| Hybrid | 0.749 / 0.757 / 0.767 / 0.780 / 0.793 | 0.739 / 0.737 / 0.735 / 0.738 / 0.744 |
+| Diversity | 0.712 / 0.704 / 0.739 / 0.764 / 0.789 | 0.733 / 0.725 / 0.715 / 0.718 / 0.724 |
+| Highest risk | 0.719 / 0.717 / 0.728 / 0.733 / 0.767 | 0.737 / 0.738 / 0.729 / 0.741 / 0.746 |
+| Uncertainty | 0.691 / 0.691 / 0.697 / 0.723 / 0.765 | 0.730 / 0.723 / 0.710 / 0.709 / 0.713 |
+| Threshold reset only | 0.739 (unchanged) | 0.747 (unchanged) |
+| New hospital only | 0.642 / 0.685 / 0.704 / 0.745 / 0.770 | 0.641 / 0.657 / 0.663 / 0.679 / 0.704 |
+
+Model as-is: A→B 0.739, B→A 0.747. All target labels: 0.846, 0.817.
+
+### Findings
+1. **Random labels help in both directions, more A→B.** At 400 patients: A→B +0.048 (closes ~45% of the gap to all target labels), B→A +0.016 (~23%).
+2. **Keep the source data.** Training on the labelled new-hospital patients alone is far worse at small budgets (0.64 at 25 patients) and still below source + the same random patients at 400 (A→B 0.770 vs 0.787; B→A 0.704 vs 0.763, below the model as-is).
+3. **Choosing patients doesn't reliably beat random.** A→B: least like source +0.010 and hybrid +0.006 over random at 400, about the size of the seed SD (0.005–0.014); hybrid +0.011 at 50 patients. B→A: every targeted strategy is at or below the model as-is. Smaller A→B gains than the 3-seed run (+0.020), so the 3-seed lead was partly noise. Paired tests to confirm.
+4. **Uncertainty and highest risk are worst in both directions.** They pick septic-heavy, long-stay patients (highest risk: 25 patients = ~5,300 hours A→B, 5x random).
+5. **Resetting the threshold needs a representative sample.** With random picks (cross-fitted), the reset threshold lands near its 80% target on test patients: A→B 81–84% flagged from 100 patients on; B→A 74–76%. With targeted picks it misses badly (A→B 400: hybrid 58%, highest risk 25%, uncertainty 39%). Their labelled septic patients were chosen for high scores, so a threshold set to catch 80% of *them* is too high for typical patients. Selection bias that helps find cases hurts threshold setting.
+6. **Resetting the threshold is a trade-off, not a free win.** A→B: the original threshold under-alerts (53% flagged / 22% non-septic alerted); resetting reaches ~80% flagged but alerts ~55% of non-septic patients, because ranking at B is weak. B→A: the original threshold over-alerts (80% / 58%); resetting keeps ~75% flagged and cuts alerts to ~49–50%. In both directions the reset brings sensitivity back to the intended level, and the worst-served group improves (A→B random at 400: 60% → 78%).
+7. **Threshold reset alone already does most of the alert work.** Threshold reset only (random, no retraining) gives 78% / 54% (A→B) and 75% / 49% (B→A) at 400. Retraining adds ranking on top: flagged at 20% alerts, random 58% vs threshold-only 51% (A→B), 56% vs 53% (B→A).
+8. **At 25–50 patients the threshold often can't be reset:** random picks had ≥ 3 septic patients in only 40–80% of seeds.
+
+### Reading
+- A practical recommendation emerges: label a random sample of 100–200 patients, reset the alert threshold on it, and retrain with the source data (1x).
+- Active selection's case-finding bias works against the second job of labels (threshold setting). That links the two jobs of labels to the choice of strategy, and is a candidate central point of the paper.
+- Open: is the A→B gain from least like source / hybrid statistically real? Paired bootstrap on saved predictions.
+
+### Next
+1. Paired bootstrap vs random at each budget (AUROC and flagged at 20% alerts), from saved predictions.
+2. Equal-hours comparison.
+3. Update README Results once the paired tests are in.
+
+---
+
 ## Commands used
 
 ```
@@ -145,6 +186,9 @@ python -m sepsis.pipeline --from-omop artifacts/omop --out artifacts --seeds 0,1
 python -m sepsis.active --omop artifacts/omop --out artifacts_active_base --seeds 3 --strategies random,diversity,domain,hybrid --budgets 25,100,400
 python -m sepsis.active --omop artifacts/omop --out artifacts_active_shared --seeds 3 --strategies random,diversity,domain,hybrid --budgets 25,100,400 --shared-features
 python -m sepsis.pipeline --from-omop artifacts/omop --out artifacts --seeds 0,1,2,3,4
+
+# Nov 11-13 (code a0e91b4)
+python -m sepsis.active --omop artifacts/omop --out artifacts_active_full --seeds 5
 ```
 
 Note: in `sepsis.active`, `--seeds` is a count (`--seeds 3` runs seeds 0–2); in `sepsis.pipeline` it is a list.
