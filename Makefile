@@ -20,6 +20,7 @@ run-fast:
 
 active:
 	$(PY) -m sepsis.active --omop artifacts/omop --out artifacts_active
+	$(PY) -m sepsis.active_compare --out artifacts_active
 
 test:
 	$(PY) -m pytest -q

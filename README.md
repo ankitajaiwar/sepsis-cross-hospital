@@ -78,7 +78,7 @@ You need Python 3.10 or newer and about 8 GB of free memory for the full dataset
 **Mac / Linux**
 ```bash
 pip install -r requirements.txt
-make test        # 22 tests on made-up data, about 10-15 minutes
+make test        # 24 tests on made-up data, about 15 minutes
 make data        # downloads the 40,336 patient files (resumable)
 make run         # full analysis, roughly 30-60 minutes on a laptop
 make active      # which-patients-to-label experiments, a few hours (run after `make run`)
@@ -93,6 +93,7 @@ python -m pytest -q
 python -m sepsis.download
 python -m sepsis.pipeline --raw data/raw --out artifacts
 python -m sepsis.active --omop artifacts/omop --out artifacts_active
+python -m sepsis.active_compare --out artifacts_active   # paired comparisons vs random, from saved predictions
 ```
 
 To train every model several times with different random seeds (recommended before
